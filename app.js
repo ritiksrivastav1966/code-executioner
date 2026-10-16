@@ -16,6 +16,7 @@ const port = 3000;
 const server = app.listen(port ,()=>{
     console.log(`server running on ${port}`)
     console.log("Compiler started");
+    console.log(process.platform);
 });
 
 app.use(express.static(path.join(__dirname,"public")));
