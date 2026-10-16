@@ -4,6 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { exitCode } = require('process');
+//const { resolve } = require('dns');
 const MAX_OUTPUT_BYTES = 50*1024;
 async function compilePipeline(sourceCode, language, input = '') {
     const jobId = crypto.randomUUID();
@@ -31,7 +32,12 @@ async function compilePipeline(sourceCode, language, input = '') {
             const compileResult = await handleProcess(compiler, 5000, true);
             
             if (compileResult.exitCode !== 0) {
-                return { success: false, ...compileResult };
+                return({
+                    status:'Compilation error',
+                    exitCode:compileResult.exitCode,
+                    error:compileResult.error
+                });
+               // return;
             }
 
             // Run C++
@@ -43,7 +49,11 @@ async function compilePipeline(sourceCode, language, input = '') {
             const compileResult = await handleProcess(compiler, 20000, true);
             
             if (compileResult.exitCode !== 0) {
-                return { success: false, ...compileResult };
+                return({
+                    status:'Compilation error',
+                    exitCode:compileResult.exitCode,
+                    error:compileResult.error
+                });
             }
 
             // Run Java
@@ -139,9 +149,9 @@ function handleProcess(processInstance, timeoutMs, isCompileStep) {
                 });
                 return;
             }
-            // 3. Check for SIGKILL 
+             
             resolve({
-                status:code===0?'SUCCESS':'RUNTIME_ERROR',
+                status:code===0?'SUCCESS':code===3221225620?'Division by zero error':'RUNTIME_ERROR',
                 output,
                 error,
                 outputBytes,
