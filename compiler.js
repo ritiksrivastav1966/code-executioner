@@ -1,12 +1,24 @@
 const fs = require('fs').promises;
+const createFs = require('fs'); // Required for createReadStream
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
-const { exitCode } = require('process');
-//const { resolve } = require('dns');
-const MAX_OUTPUT_BYTES = 50 * 1024;
+
+const MAX_OUTPUT_BYTES = 50 * 1024;       // Max 50KB captured output
+const MAX_INPUT_BYTES = 1 * 1024 * 1024;    // Max 1MB allowed for stdin
+
 async function compilePipeline(sourceCode, language, input = '') {
+    // 1. Enforce strict input size validation
+    if (input && Buffer.byteLength(input, 'utf8') > MAX_INPUT_BYTES) {
+        return {
+            success: false,
+            status: 'INPUT_LIMIT_EXCEEDED',
+            error: 'Input data is too large (max 1MB allowed)',
+            exitCode: -1
+        };
+    }
+
     const jobId = crypto.randomUUID();
     const buildDir = path.join(os.tmpdir(), `compiler-${jobId}`);
 
@@ -21,65 +33,79 @@ async function compilePipeline(sourceCode, language, input = '') {
         const sourcePath = path.join(buildDir, fileName);
         await fs.writeFile(sourcePath, sourceCode, 'utf8');
 
+        // 2. Write input to a temp file to prevent memory bloat and stream backpressure
+        let inputPath = null;
+        if (input) {
+            inputPath = path.join(buildDir, 'input.txt');
+            await fs.writeFile(inputPath, input, 'utf8');
+        }
+
         let program;
         let pid;
 
         // --- LANGUAGE SPECIFIC LOGIC ---
         if (language === 'cpp') {
-            const outputPath = path.join(buildDir, 'program.exe');
+            const outputPath = path.join(buildDir, 'program');
 
-            // Compile C++ (Give it 5000ms to compile)
+            // Compile C++ (Give it 5000ms)
             const compiler = spawn('g++', [sourcePath, '-o', outputPath], { detached: true });
-            const compileResult = await handleProcess(compiler, 5000, true, compiler.pid);
+            const compileResult = await handleProcess(compiler, 5000, compiler.pid);
 
             if (compileResult.exitCode !== 0) {
-                return ({
+                return {
+                    success: false,
                     status: 'Compilation error',
                     exitCode: compileResult.exitCode,
-                    error: compileResult.error
-                });
-                // return;
+                    error: compileResult.error || compileResult.output
+                };
             }
 
-            // Run C++
-            program = spawn(outputPath, [], { detached: true });
+            // Run C++ with stdin streaming from input.txt
+            const stdinStream = inputPath ? createFs.createReadStream(inputPath) : 'ignore';
+            program = spawn(outputPath, [], { 
+                detached: true,
+                stdio: [stdinStream, 'pipe', 'pipe']
+            });
             pid = program.pid;
 
         } else if (language === 'java') {
-            // Compile Java (Give it 5000ms to compile)
+            // Compile Java (Give it 20000ms)
             const compiler = spawn('javac', [sourcePath], { detached: true });
-            const compileResult = await handleProcess(compiler, 20000, true, compiler.pid);
+            const compileResult = await handleProcess(compiler, 20000, compiler.pid);
 
             if (compileResult.exitCode !== 0) {
-                return ({
+                return {
+                    success: false,
                     status: 'Compilation error',
                     exitCode: compileResult.exitCode,
-                    error: compileResult.error
-                });
+                    error: compileResult.error || compileResult.output
+                };
             }
 
-            // Run Java
-            program = spawn('java', ['Main'], { cwd: buildDir, detached: true });
+            // Run Java with stdin streaming from input.txt
+            const stdinStream = inputPath ? createFs.createReadStream(inputPath) : 'ignore';
+            program = spawn('java', ['Main'], { 
+                cwd: buildDir, 
+                detached: true,
+                stdio: [stdinStream, 'pipe', 'pipe']
+            });
             pid = program.pid;
 
         } else if (language === 'python') {
-            // Python, run it directly
-            program = spawn('python', [sourcePath], { detached: true });
+            // Python execution with stdin streaming
+            const stdinStream = inputPath ? createFs.createReadStream(inputPath) : 'ignore';
+            program = spawn('python3', [sourcePath], { 
+                detached: true,
+                stdio: [stdinStream, 'pipe', 'pipe']
+            });
             pid = program.pid;
         } else {
             throw new Error("Unsupported language");
         }
 
         // --- SHARED EXECUTION LOGIC ---
-
-        if (input) {
-            program.stdin.write(input);
-
-        }
-        program.stdin.end();
-
-        // Capture execution output (Give it 2000ms to execute)
-        const executionResult = await handleProcess(program, 10000, false, pid);
+        // Run execution (Give it 10000ms max)
+        const executionResult = await handleProcess(program, 10000, pid);
 
         return {
             success: executionResult.exitCode === 0,
@@ -87,50 +113,48 @@ async function compilePipeline(sourceCode, language, input = '') {
         };
 
     } finally {
+        // Cleanup build directory securely
         await fs.rm(buildDir, { recursive: true, force: true });
     }
 }
 
+// Cross-platform helper to kill process or process tree cleanly
+function killProcessTree(pid) {
+    try {
+        if (process.platform === 'win32') {
+            spawn('taskkill', ['/pid', pid, '/f', '/t']);
+        } else {
+            process.kill(-pid, 'SIGKILL');
+        }
+    } catch (err) {
+        if (err.code !== 'ESRCH') {
+            console.error(err);
+        }
+    }
+}
+
 // For execution of processes
-function handleProcess(processInstance, timeoutMs, isCompileStep, pid) {
+function handleProcess(processInstance, timeoutMs, pid) {
     return new Promise((resolve, reject) => {
         let output = '';
         let error = '';
         let outputBytes = 0;
         let terminationReason = null;
 
-
         const tleTimer = setTimeout(() => {
             if (processInstance.exitCode === null) {
-                try {
-                    terminationReason='TIME_LIMIT_EXCEDDED';
-                    console.log(pid);
-                    process.kill(-pid, 'SIGKILL');
-                } catch (err) {
-                    if (err.code !== 'ESRCH') {
-                        console.error(err);
-                    }
-                }
+                terminationReason = 'TIME_LIMIT_EXCEDDED';
+                killProcessTree(pid);
             }
-        }, 3000);
-
-        processInstance.on('exit', () => {
-            clearTimeout(tleTimer);
-        });
+        }, timeoutMs);
 
         processInstance.stdout.on('data', (data) => {
             outputBytes += data.length;
             if (outputBytes > MAX_OUTPUT_BYTES) {
                 terminationReason = 'OUTPUT_LIMIT_EXCEDDED';
-                 if (processInstance.exitCode === null) {
-                try {
-                    process.kill(-pid, 'SIGKILL');
-                } catch (err) {
-                    if (err.code !== 'ESRCH') {
-                        console.error(err);
-                    }
+                if (processInstance.exitCode === null) {
+                    killProcessTree(pid);
                 }
-            }
                 return;
             }
             output += data.toString();
@@ -140,15 +164,9 @@ function handleProcess(processInstance, timeoutMs, isCompileStep, pid) {
             outputBytes += data.length;
             if (outputBytes > MAX_OUTPUT_BYTES) {
                 terminationReason = 'OUTPUT_LIMIT_EXCEDDED';
-                 if (processInstance.exitCode === null) {
-                try {
-                    process.kill(-pid, 'SIGKILL');
-                } catch (err) {
-                    if (err.code !== 'ESRCH') {
-                        console.error(err);
-                    }
+                if (processInstance.exitCode === null) {
+                    killProcessTree(pid);
                 }
-            }
                 return;
             }
             error += data.toString();
@@ -159,35 +177,36 @@ function handleProcess(processInstance, timeoutMs, isCompileStep, pid) {
             reject(err);
         });
 
-        processInstance.on('close', (code, signal) => {
-            // 2. Clear the timer 
+        processInstance.on('close', (code,signal) => {
             clearTimeout(tleTimer);
+
             if (terminationReason === 'OUTPUT_LIMIT_EXCEDDED') {
-                resolve({
+                return resolve({
                     status: 'OUTPUT_LIMIT_EXCEDDED',
                     output,
-                    error,
+                    error: 'Output limit exceeded (max 50KB)',
                     outputBytes,
+                    signal:signal,
                     exitCode: -1
                 });
-                return;
             }
             if (terminationReason === 'TIME_LIMIT_EXCEDDED') {
-                resolve({
+                return resolve({
                     status: 'TIME_LIMIT_EXCEDDED',
                     output,
-                    error: 'Your code took too long',
+                    error: 'Your code took too long (Time Limit Exceeded)',
                     outputBytes,
+                    signal:signal,
                     exitCode: -1
                 });
-                return;
             }
 
             resolve({
-                status: code === 0 ? 'SUCCESS' : code === 3221225620 ? 'Division by zero error' : 'RUNTIME_ERROR',
+                status: code === 0 ? 'SUCCESS' : 'RUNTIME_ERROR',
                 output,
                 error,
                 outputBytes,
+                signal:signal,
                 exitCode: code
             });
         });

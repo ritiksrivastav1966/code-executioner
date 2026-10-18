@@ -3,255 +3,192 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Online Compiler</title>
-  <style>
-    /* Dark theme color palette */
-    :root {
-      --bg-color: #0d1117;
-      --surface-color: #161b22;
-      --border-color: #30363d;
-      --text-main: #c9d1d9;
-      --text-muted: #8b949e;
-      --accent-color: #58a6ff;
-      --accent-hover: #3182ce;
-      --font-mono: 'Consolas', 'Fira Code', 'Courier New', monospace;
-      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    }
+  <title>Code Executioner</title>
 
-    body {
-      background-color: var(--bg-color);
-      color: var(--text-main);
-      font-family: var(--font-sans);
-      display: flex;
-      justify-content: center;
-      padding: 40px 20px;
-      margin: 0;
+  <style>
+    * {
       box-sizing: border-box;
     }
 
-    .editor-container {
-      background-color: var(--surface-color);
-      border: 1px solid var(--border-color);
-      border-radius: 8px;
-      padding: 24px 32px;
-      width: 100%;
-      max-width: 800px;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-    }
-
-    .editor-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 20px;
-      padding-bottom: 15px;
-      border-bottom: 1px solid var(--border-color);
-    }
-
-    .editor-header h2 {
+    body {
       margin: 0;
-      font-size: 20px;
-      font-weight: 600;
+      font-family: Arial, sans-serif;
+      background: #111;
+      color: #eee;
     }
 
-    .form-group {
+    .container {
+      width: min(1000px, 95%);
+      margin: 30px auto;
+    }
+
+    h1 {
       margin-bottom: 20px;
+    }
+
+    .toolbar {
       display: flex;
-      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 10px;
     }
 
-    label {
-      font-size: 14px;
-      font-weight: 500;
-      color: var(--text-muted);
-      margin-bottom: 8px;
-      display: flex;
-      justify-content: space-between;
-    }
-
-    /* Styling the dropdown */
-    select {
-      background-color: var(--bg-color);
-      color: var(--text-main);
-      border: 1px solid var(--border-color);
-      border-radius: 6px;
-      padding: 8px 12px;
-      font-family: var(--font-sans);
-      font-size: 14px;
-      cursor: pointer;
-      outline: none;
-      width: fit-content;
-      transition: border-color 0.2s;
-    }
-
-    /* Styling the code and input areas */
-    textarea {
-      background-color: var(--bg-color);
-      color: var(--text-main);
-      border: 1px solid var(--border-color);
-      border-radius: 6px;
-      padding: 16px;
-      font-family: var(--font-mono);
-      font-size: 14px;
-      line-height: 1.5;
-      outline: none;
-      resize: vertical;
-      transition: border-color 0.2s, box-shadow 0.2s;
-    }
-
-    textarea::placeholder {
-      color: #484f58;
-    }
-
-    textarea:focus, select:focus {
-      border-color: var(--accent-color);
-      box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
-    }
-
-    #plainTextArea {
-      min-height: 300px;
-    }
-
-    #Input {
-      min-height: 120px;
-    }
-
-    /* Submit Button */
+    select,
     button {
-      background-color: var(--accent-color);
-      color: #ffffff;
-      border: none;
+      padding: 10px 14px;
       border-radius: 6px;
-      padding: 10px 24px;
-      font-size: 15px;
-      font-weight: 600;
+      border: 1px solid #444;
+      background: #222;
+      color: white;
       cursor: pointer;
-      transition: background-color 0.2s, transform 0.1s;
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      align-self: flex-end;
+    }
+
+    button {
+      background: #2563eb;
+      border: none;
     }
 
     button:hover {
-      background-color: var(--accent-hover);
+      background: #1d4ed8;
     }
 
-    button:active {
-      transform: scale(0.98);
+    textarea {
+      width: 100%;
+      border: 1px solid #333;
+      border-radius: 8px;
+      background: #181818;
+      color: #eee;
+      padding: 15px;
+      font-family: monospace;
+      font-size: 15px;
+      resize: vertical;
     }
 
-    /* Custom Scrollbar for a seamless look */
-    ::-webkit-scrollbar {
-      width: 10px;
-      height: 10px;
+    #code {
+      height: 400px;
     }
-    ::-webkit-scrollbar-track {
-      background: var(--bg-color);
+
+    #stdin {
+      height: 120px;
+      margin-top: 15px;
     }
-    ::-webkit-scrollbar-thumb {
-      background: #484f58;
-      border-radius: 5px;
+
+    .output {
+      margin-top: 20px;
     }
-    ::-webkit-scrollbar-thumb:hover {
-      background: #6e7681;
+
+    pre {
+      background: #181818;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 15px;
+      min-height: 150px;
+      white-space: pre-wrap;
+      overflow-x: auto;
+    }
+
+    .status {
+      margin-bottom: 8px;
+      font-weight: bold;
     }
   </style>
 </head>
+
 <body>
 
-  <div class="editor-container">
-    <div class="editor-header">
-      <h2>Code Workspace</h2>
+  <div class="container">
+
+    <h1>Code Executioner</h1>
+
+    <div class="toolbar">
+      <select id="language">
+        <option value="cpp">C++</option>
+        <option value="python">Python</option>
+        <option value="java">Java</option>
+      </select>
+
+      <button id="runBtn">Run Code</button>
     </div>
 
-    <form id="plainCodeForm">
-      <div class="form-group">
-        <label for="language">Language</label>
-        <select name="language" id="language">
-            <option value="cpp">C++ (GCC)</option>
-            <option value="python">Python 3</option>
-            <option value="java">Java</option>
-        </select>
-      </div>
-      
-      <div class="form-group">
-        <label for="plainTextArea">
-          <span>Source Code</span>
-        </label>
-        <textarea 
-          id="plainTextArea" 
-          name="userCode" 
-          placeholder="// Write your logic here..."
-          spellcheck="false"
-        ></textarea>
-      </div>
-      
-      <div class="form-group">
-        <label for="Input">Custom Input</label>
-        <textarea 
-          name="input" 
-          id="Input" 
-          placeholder="Enter input parameters..."
-          spellcheck="false"
-        ></textarea>
-      </div>
-      
-      <div class="form-group" style="flex-direction: row; justify-content: flex-end;">
-        <button type="submit" id="submitBtn">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-          Run Code
-        </button>
-      </div>
-    </form>
+    <textarea id="code" placeholder="Write your code here..."></textarea>
+
+    <textarea
+      id="stdin"
+      placeholder="Program input (stdin)..."
+    ></textarea>
+
+    <div class="output">
+      <div class="status" id="status">Status: —</div>
+
+      <pre id="output">Output will appear here...</pre>
+    </div>
+
   </div>
 
   <script>
-    const form = document.getElementById('plainCodeForm');
-    const submitBtn = document.getElementById('submitBtn');
+    const runBtn = document.getElementById("runBtn");
+    const language = document.getElementById("language");
+    const code = document.getElementById("code");
+    const stdin = document.getElementById("stdin");
 
-    form.addEventListener('submit', function(event) {
-      // Prevent the browser from refreshing the page automatically
-      event.preventDefault(); 
+    const status = document.getElementById("status");
+    const output = document.getElementById("output");
 
-      // Visual feedback on the button
-      const originalText = submitBtn.innerHTML;
-      submitBtn.innerHTML = 'Running...';
-      submitBtn.style.opacity = '0.8';
-      submitBtn.disabled = true;
+    runBtn.addEventListener("click", async () => {
 
-      // Extract text using .value
-      const rawPlainCode = document.getElementById('plainTextArea').value;
-      const language = document.getElementById('language').value;
-      const input = document.getElementById('Input').value;
+      const sourceCode = code.value.trim();
 
-      // Package it into JSON payload
-      const payload = {
-        code: rawPlainCode,
-        language: language,
-        input: input
-      };
+      if (!sourceCode) {
+        status.textContent = "Status: Please enter code";
+        return;
+      }
 
-      // Fire the network request
-      fetch('http://localhost:3000/compile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      })
-      .then(res => res.json())
-      .then(data => {
-        console.log(data);
-        // You can add logic here to display the 'data' in a new output div
-      })
-      .catch(err => {
-        console.error(err);
-      })
-      .finally(() => {
-        // Reset button state
-        submitBtn.innerHTML = originalText;
-        submitBtn.style.opacity = '1';
-        submitBtn.disabled = false;
-      });
+      runBtn.disabled = true;
+      runBtn.textContent = "Running...";
+
+      status.textContent = "Status: Executing...";
+      output.textContent = "";
+
+      try {
+
+        const response = await fetch("http://localhost:3000/compile", {
+          method: "POST",
+
+          headers: {
+            "Content-Type": "application/json"
+          },
+
+          body: JSON.stringify({
+            language: language.value,
+            code: sourceCode,
+            input: stdin.value
+          })
+        });
+
+        const result = await response.json();
+        console.log(result);
+
+        if (!response.ok) {
+          throw new Error(result.message || "Execution failed");
+        }
+
+        status.textContent =
+          `Status: ${result.status || "Completed"}`;
+
+        output.textContent =result.error||
+          result.output ||
+          result.stderr ||
+          "No output";
+
+      } catch (error) {
+
+        status.textContent = "Status: Error";
+        output.textContent = error.message;
+
+      } finally {
+
+        runBtn.disabled = false;
+        runBtn.textContent = "Run Code";
+      }
     });
   </script>
 
