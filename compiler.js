@@ -4,6 +4,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const cgroup = require('./controllers/resourcelimitcontroller');
 
 const MAX_OUTPUT_BYTES = 50 * 1024;       // Max 50KB captured output
 const MAX_INPUT_BYTES = 1 * 1024 * 1024;    // Max 1MB allowed for stdin
@@ -21,7 +22,7 @@ async function compilePipeline(sourceCode, language, input = '') {
 
     const jobId = crypto.randomUUID();
     const buildDir = path.join(os.tmpdir(), `compiler-${jobId}`);
-
+  const cgroupPath =   await cgroup.createCgroup(jobId,256*1024*1024,"memory");
     try {
         await fs.mkdir(buildDir, { recursive: true });
 
@@ -67,6 +68,7 @@ async function compilePipeline(sourceCode, language, input = '') {
                 stdio: [stdinStream, 'pipe', 'pipe']
             });
             pid = program.pid;
+         await   cgroup.addProcess(cgroupPath,pid);
 
         } else if (language === 'java') {
             // Compile Java (Give it 20000ms)
@@ -90,6 +92,7 @@ async function compilePipeline(sourceCode, language, input = '') {
                 stdio: [stdinStream, 'pipe', 'pipe']
             });
             pid = program.pid;
+            await   cgroup.addProcess(cgroupPath,pid);
 
         } else if (language === 'python') {
             // Python execution with stdin streaming
@@ -99,6 +102,7 @@ async function compilePipeline(sourceCode, language, input = '') {
                 stdio: [stdinStream, 'pipe', 'pipe']
             });
             pid = program.pid;
+            await   cgroup.addProcess(cgroupPath,pid);
         } else {
             throw new Error("Unsupported language");
         }
