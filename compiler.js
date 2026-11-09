@@ -1,13 +1,13 @@
 const fs = require('fs').promises;
-const createFs = require('fs'); // Required for createReadStream
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const cgroup = require('./controllers/resourcelimitcontroller');
 
-const MAX_OUTPUT_BYTES = 50 * 1024;       // Max 50KB captured output
-const MAX_INPUT_BYTES = 1 * 1024 * 1024;    // Max 1MB allowed for stdin
+const MAX_OUTPUT_BYTES = 50 * 1024;          // Max 50KB captured output
+const MAX_INPUT_BYTES = 1 * 1024 * 1024;     // Max 1MB allowed for stdin
+const MEMORY_LIMIT_BYTES = 256 * 1024 * 1024; // 256MB per run
 
 async function compilePipeline(sourceCode, language, input = '') {
     // 1. Enforce strict input size validation
@@ -22,33 +22,35 @@ async function compilePipeline(sourceCode, language, input = '') {
 
     const jobId = crypto.randomUUID();
     const buildDir = path.join(os.tmpdir(), `compiler-${jobId}`);
-  const cgroupPath =   await cgroup.createCgroup(jobId,256*1024*1024,"memory");
+    let cgroupPath = null;
+
     try {
+        // Created inside try so any failure returns an error instead of hanging
+        cgroupPath = await cgroup.createCgroup(jobId, MEMORY_LIMIT_BYTES, 'memory');
+
         await fs.mkdir(buildDir, { recursive: true });
 
         let fileName = 'main';
         if (language === 'python') fileName += '.py';
         else if (language === 'java') fileName = 'Main.java';
-        else fileName += '.cpp';
+        else if (language === 'cpp') fileName += '.cpp';
+        else throw new Error('Unsupported language');
 
         const sourcePath = path.join(buildDir, fileName);
         await fs.writeFile(sourcePath, sourceCode, 'utf8');
 
-        // 2. Write input to a temp file to prevent memory bloat and stream backpressure
+        // 2. Write input to a temp file to prevent memory bloat and backpressure
         let inputPath = null;
         if (input) {
             inputPath = path.join(buildDir, 'input.txt');
             await fs.writeFile(inputPath, input, 'utf8');
         }
 
-        let program;
-        let pid;
-
         // --- LANGUAGE SPECIFIC LOGIC ---
+        let cmd, args, cwd;
+
         if (language === 'cpp') {
             const outputPath = path.join(buildDir, 'program');
-
-            // Compile C++ (Give it 5000ms)
             const compiler = spawn('g++', [sourcePath, '-o', outputPath], { detached: true });
             const compileResult = await handleProcess(compiler, 5000, compiler.pid);
 
@@ -60,18 +62,11 @@ async function compilePipeline(sourceCode, language, input = '') {
                     error: compileResult.error || compileResult.output
                 };
             }
-
-            // Run C++ with stdin streaming from input.txt
-            const stdinStream = inputPath ? createFs.createReadStream(inputPath) : 'ignore';
-            program = spawn(outputPath, [], { 
-                detached: true,
-                stdio: [stdinStream, 'pipe', 'pipe']
-            });
-            pid = program.pid;
-         await   cgroup.addProcess(cgroupPath,pid);
+            cmd = outputPath;
+            args = [];
+            cwd = buildDir;
 
         } else if (language === 'java') {
-            // Compile Java (Give it 20000ms)
             const compiler = spawn('javac', [sourcePath], { detached: true });
             const compileResult = await handleProcess(compiler, 20000, compiler.pid);
 
@@ -83,50 +78,85 @@ async function compilePipeline(sourceCode, language, input = '') {
                     error: compileResult.error || compileResult.output
                 };
             }
+            cmd = 'java';
+            args = ['Main'];
+            cwd = buildDir;
 
-            // Run Java with stdin streaming from input.txt
-            const stdinStream = inputPath ? createFs.createReadStream(inputPath) : 'ignore';
-            program = spawn('java', ['Main'], { 
-                cwd: buildDir, 
-                detached: true,
-                stdio: [stdinStream, 'pipe', 'pipe']
-            });
-            pid = program.pid;
-            await   cgroup.addProcess(cgroupPath,pid);
-
-        } else if (language === 'python') {
-            // Python execution with stdin streaming
-            const stdinStream = inputPath ? createFs.createReadStream(inputPath) : 'ignore';
-            program = spawn('python3', [sourcePath], { 
-                detached: true,
-                stdio: [stdinStream, 'pipe', 'pipe']
-            });
-            pid = program.pid;
-            await   cgroup.addProcess(cgroupPath,pid);
         } else {
-            throw new Error("Unsupported language");
+            cmd = 'python3';
+            args = [sourcePath];
+            cwd = buildDir;
         }
 
         // --- SHARED EXECUTION LOGIC ---
-        // Run execution (Give it 10000ms max)
-        const executionResult = await handleProcess(program, 10000, pid);
-
+        const executionResult = await runInCgroup(cmd, args, cwd, inputPath, cgroupPath);
         return {
             success: executionResult.exitCode === 0,
             ...executionResult
         };
 
+    } catch (err) {
+        console.error('compilePipeline error:', err);
+        return {
+            success: false,
+            status: 'INTERNAL_ERROR',
+            error: err.message,
+            exitCode: -1
+        };
     } finally {
-        // Cleanup build directory securely
-        await fs.rm(buildDir, { recursive: true, force: true });
+        await fs.rm(buildDir, { recursive: true, force: true }).catch(() => {});
+        if (cgroupPath) {
+            await cgroup.removeCgroup(cgroupPath).catch((e) =>
+                console.error('cgroup cleanup failed:', e.message)
+            );
+        }
     }
+}
+
+// Spawns the program, attaches listeners first, then moves it into the cgroup
+async function runInCgroup(cmd, args, cwd, inputPath, cgroupPath) {
+    let inputHandle = null;
+    let program;
+
+    try {
+        // Pass a real file descriptor (a ReadStream may not be open yet when spawn runs)
+        if (inputPath) inputHandle = await fs.open(inputPath, 'r');
+
+        program = spawn(cmd, args, {
+            cwd,
+            detached: true,
+            stdio: [inputHandle ? inputHandle.fd : 'ignore', 'pipe', 'pipe']
+        });
+    } finally {
+        // Child has its own copy of the fd now
+        if (inputHandle) await inputHandle.close().catch(() => {});
+    }
+
+    const pid = program.pid;
+
+    // Attach listeners BEFORE any await so fast programs can't finish unobserved
+    const execPromise = handleProcess(program, 10000, pid);
+
+    // pid is undefined if spawn failed; handleProcess resolves with SPAWN_ERROR
+    if (pid) {
+        try {
+            await cgroup.addProcess(cgroupPath, pid);
+        } catch (err) {
+            killProcessTree(pid);
+            await execPromise.catch(() => {});
+            throw err;
+        }
+    }
+
+    return execPromise;
 }
 
 // Cross-platform helper to kill process or process tree cleanly
 function killProcessTree(pid) {
+    if (!pid) return;
     try {
         if (process.platform === 'win32') {
-            spawn('taskkill', ['/pid', pid, '/f', '/t']);
+            spawn('taskkill', ['/pid', String(pid), '/f', '/t']);
         } else {
             process.kill(-pid, 'SIGKILL');
         }
@@ -139,78 +169,97 @@ function killProcessTree(pid) {
 
 // For execution of processes
 function handleProcess(processInstance, timeoutMs, pid) {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
         let output = '';
         let error = '';
         let outputBytes = 0;
         let terminationReason = null;
+        let settled = false;
+
+        const finish = (result) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(tleTimer);
+            resolve(result);
+        };
 
         const tleTimer = setTimeout(() => {
             if (processInstance.exitCode === null) {
-                terminationReason = 'TIME_LIMIT_EXCEDDED';
+                terminationReason = 'TIME_LIMIT_EXCEEDED';
                 killProcessTree(pid);
             }
         }, timeoutMs);
 
-        processInstance.stdout.on('data', (data) => {
+        const capture = (data, isStdout) => {
             outputBytes += data.length;
-            if (outputBytes > MAX_OUTPUT_BYTES) {
-                terminationReason = 'OUTPUT_LIMIT_EXCEDDED';
-                if (processInstance.exitCode === null) {
-                    killProcessTree(pid);
-                }
-                return;
-            }
-            output += data.toString();
-        });
 
-        processInstance.stderr.on('data', (data) => {
-            outputBytes += data.length;
             if (outputBytes > MAX_OUTPUT_BYTES) {
-                terminationReason = 'OUTPUT_LIMIT_EXCEDDED';
+                terminationReason = 'OUTPUT_LIMIT_EXCEEDED';
                 if (processInstance.exitCode === null) {
                     killProcessTree(pid);
                 }
                 return;
             }
-            error += data.toString();
-        });
+
+            if (isStdout) output += data.toString();
+            else error += data.toString();
+        };
+
+        processInstance.stdout.on('data', (d) => capture(d, true));
+        processInstance.stderr.on('data', (d) => capture(d, false));
 
         processInstance.on('error', (err) => {
-            clearTimeout(tleTimer);
-            reject(err);
+            finish({
+                status: 'SPAWN_ERROR',
+                output,
+                error: err.message,
+                outputBytes,
+                exitCode: -1
+            });
         });
 
-        processInstance.on('close', (code,signal) => {
-            clearTimeout(tleTimer);
-
-            if (terminationReason === 'OUTPUT_LIMIT_EXCEDDED') {
-                return resolve({
-                    status: 'OUTPUT_LIMIT_EXCEDDED',
+        // 'close' fires once the process has exited and stdio is closed
+        processInstance.on('close', (code, signal) => {
+            if (terminationReason === 'OUTPUT_LIMIT_EXCEEDED') {
+                return finish({
+                    status: 'OUTPUT_LIMIT_EXCEEDED',
                     output,
                     error: 'Output limit exceeded (max 50KB)',
                     outputBytes,
-                    signal:signal,
-                    exitCode: -1
-                });
-            }
-            if (terminationReason === 'TIME_LIMIT_EXCEDDED') {
-                return resolve({
-                    status: 'TIME_LIMIT_EXCEDDED',
-                    output,
-                    error: 'Your code took too long (Time Limit Exceeded)',
-                    outputBytes,
-                    signal:signal,
+                    signal,
                     exitCode: -1
                 });
             }
 
-            resolve({
+            if (terminationReason === 'TIME_LIMIT_EXCEEDED') {
+                return finish({
+                    status: 'TIME_LIMIT_EXCEEDED',
+                    output,
+                    error: 'Your code took too long (Time Limit Exceeded)',
+                    outputBytes,
+                    signal,
+                    exitCode: -1
+                });
+            }
+
+            // Killed by the kernel with no reason from us: most likely the cgroup OOM killer
+            if (signal === 'SIGKILL') {
+                return finish({
+                    status: 'MEMORY_LIMIT_EXCEEDED',
+                    output,
+                    error: 'Process was killed (likely Memory Limit Exceeded)',
+                    outputBytes,
+                    signal,
+                    exitCode: -1
+                });
+            }
+
+            finish({
                 status: code === 0 ? 'SUCCESS' : 'RUNTIME_ERROR',
                 output,
                 error,
                 outputBytes,
-                signal:signal,
+                signal,
                 exitCode: code
             });
         });
